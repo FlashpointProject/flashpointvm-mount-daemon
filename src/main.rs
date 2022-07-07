@@ -1,6 +1,6 @@
-use std::sync::{Arc, Mutex};
-use std::{collections::HashSet, hash::BuildHasher};
+use std::{collections::HashSet, hash::BuildHasher, sync::Arc};
 
+use parking_lot::{Mutex};
 use fnv::{FnvHashMap, FnvHashSet};
 use tokio::fs::{create_dir_all, metadata, remove_dir};
 use tokio::join;
@@ -152,31 +152,25 @@ async fn mount_device<T: BuildHasher>(
     //  - The device is already mounted.
     //  - The device is being mounted/unmounted by another request.
     // So, we synchronize with some shared state.
-    match shared_state.status.lock() {
-        Ok(mut mount_status) => {
-            // Is it already mounted?
-            if mount_status.mounted.contains(&content) {
-                return HTTPResponse {
-                    status: 304,
-                    body: "Device is already mounted.".to_owned(),
-                };
-            }
-            // Is a mount operation currently in progess?
-            if mount_status.changing.contains(&content) {
-                return HTTPResponse {
-                    status: 409,
-                    body: "Mount operation already in progress.".to_owned(),
-                };
-            }
-            // Checks passed, it's safe to proceed. Mark this device as in-progress.
-            mount_status.changing.insert(content.clone());
-        }
-        Err(_) => {
+    {
+        let mut mount_status = shared_state.status.lock();
+        // Is it already mounted?
+        if mount_status.mounted.contains(&content) {
             return HTTPResponse {
-                status: 500,
-                body: "Failed to acquire state lock.".to_owned(),
+                status: 304,
+                body: "Device is already mounted.".to_owned(),
             };
         }
+        // Is a mount operation currently in progess?
+        if mount_status.changing.contains(&content) {
+            return HTTPResponse {
+                status: 409,
+                body: "Mount operation already in progress.".to_owned(),
+            };
+        }
+        // Checks passed, it's safe to proceed. Mark this device as in-progress.
+        mount_status.changing.insert(content.clone());
+        
     }
 
     // Create the mountmounts in /tmp. For creating folders, we use create_dir_all.
@@ -267,18 +261,11 @@ async fn mount_device<T: BuildHasher>(
         // Beyond that, we guarantee nothing about ordering. Honestly, people should be
         // using the umount api (TODO) after a game closes anyway.
         let mut mountlist: Vec<String> = vec![BASE_DIR.to_owned(), content.clone()];
-        match shared_state.status.lock() {
-            Ok(mount_status) => {
-                for key in &mount_status.mounted {
-                    // PERF: zero-copy?
-                    mountlist.push(key.clone());
-                }
-            }
-            Err(_) => {
-                return HTTPResponse {
-                    status: 500,
-                    body: "Failed to acquire state lock.".to_owned(),
-                };
+        {
+            let mount_status = shared_state.status.lock();
+            for key in &mount_status.mounted {
+                // PERF: zero-copy?
+                mountlist.push(key.clone());
             }
         }
 
@@ -295,17 +282,11 @@ async fn mount_device<T: BuildHasher>(
         }
 
         // The zip is mounted! Move this device's status from changing (inflight) to mounted.
-        match shared_state.status.lock() {
-            Ok(mut mount_status) => {
-                mount_status.changing.remove(&content);
-                mount_status.mounted.insert(content);
-            }
-            Err(_) => {
-                return HTTPResponse {
-                    status: 500,
-                    body: "Failed to acquire state lock.".to_owned(),
-                };
-            }
+        {
+            let mut mount_status = shared_state.status.lock();
+            mount_status.changing.remove(&content);
+            mount_status.mounted.insert(content);
+        
         }
         // We have to use it so that it won't get dropped - the mutex unlocks on-drop.
         *count += 1;
@@ -333,25 +314,18 @@ async fn umount_device<T: BuildHasher>(
     let content = fuzzy_mountpt.clone() + "/content";
 
     // Verify that this device is indeed mounted. We wouldn't want to try unmounting a device that isn't mounted.
-    match shared_state.status.lock() {
-        Ok(mount_status) => {
-            if mount_status.changing.contains(&content) {
-                return HTTPResponse {
-                    status: 409,
-                    body: "Mount operation already in progress.".to_owned(),
-                };
-            }
-            if !mount_status.mounted.contains(&content) {
-                return HTTPResponse {
-                    status: 304,
-                    body: "Device is not mounted.".to_owned(),
-                };
-            }
-        }
-        Err(_) => {
+    {
+        let mount_status = shared_state.status.lock();
+        if mount_status.changing.contains(&content) {
             return HTTPResponse {
-                status: 500,
-                body: "Failed to acquire state lock.".to_owned(),
+                status: 409,
+                body: "Mount operation already in progress.".to_owned(),
+            };
+        }
+        if !mount_status.mounted.contains(&content) {
+            return HTTPResponse {
+                status: 304,
+                body: "Device is not mounted.".to_owned(),
             };
         }
     }
@@ -370,19 +344,12 @@ async fn umount_device<T: BuildHasher>(
 
         // Change the status from mounted to changing, and pick up a list of mounted zips at the same time.
         let mut mountlist: Vec<String> = vec![BASE_DIR.to_owned()];
-        match shared_state.status.lock() {
-            Ok(mut mount_status) => {
-                mount_status.mounted.remove(&content);
-                mount_status.changing.insert(content.clone());
-                for key in &mount_status.mounted {
-                    mountlist.push(key.clone());
-                }
-            }
-            Err(_) => {
-                return HTTPResponse {
-                    status: 500,
-                    body: "Failed to acquire state lock.".to_owned(),
-                };
+        {
+            let mut mount_status = shared_state.status.lock();
+            mount_status.mounted.remove(&content);
+            mount_status.changing.insert(content.clone());
+            for key in &mount_status.mounted {
+                mountlist.push(key.clone());
             }
         }
 
@@ -454,16 +421,10 @@ fn remove_changing<T: BuildHasher>(
     key: &str,
     shared_state: &Arc<LockedMountStatus<T>>,
 ) -> Option<HTTPResponse> {
-    match shared_state.status.lock() {
-        Ok(mut mount_status) => {
-            mount_status.changing.remove(key);
-            None
-        }
-        Err(_) => Some(HTTPResponse {
-            status: 500,
-            body: "Failed to acquire state lock.".to_owned(),
-        }),
-    }
+    let mut mount_status = shared_state.status.lock();
+    mount_status.changing.remove(key);
+    None
+        
 }
 
 /// Wait for a process to spawn and exit, and handle any errors that result.

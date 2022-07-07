@@ -118,6 +118,7 @@ name = "flashpointvm-mount-daemon"
 version = "0.1.0"
 dependencies = [
  "fnv",
+ "parking_lot",
  "tokio",
  "warp",
 ]
