@@ -1,0 +1,76 @@
+on:
+  push:
+    branches: [ "master" ]
+
+name: build
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: FlashpointVM Mount Daemon
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the repo.
+        uses: actions/checkout@v3
+      - name: Grab commit SHA.
+        id: prepare
+        run: echo "::set-output name=sha_short::$(git rev-parse --short HEAD)"
+      - name: Install latest stable
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          target: i686-unknown-linux-musl
+          default: true
+      - name: Lint the formatting.
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+      - name: Lint the syntax.
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: -- -D warnings
+      - name: Build for docker
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --features docker --target i686-unknown-linux-musl
+      - name: Rename docker binary.
+        run: mv ./target/i686-unknown-linux-musl/release/flashpointvm-mount-daemon ./target/i686-unknown-linux-musl/release/flashpointvm-mount-daemon_docker
+      - name: Build for QEMU
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --target i686-unknown-linux-musl
+      - name: Create release
+        uses: actions/create-release@v1
+        id: create_release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.prepare.outputs.sha_short }}
+          release_name: ${{ steps.prepare.outputs.sha_short }}
+          draft: false
+          prerelease: false
+      - name: Upload release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./target/i686-unknown-linux-musl/release/flashpointvm-mount-daemon_docker
+          asset_name: flashpointvm-mount-daemon_i686-unknown-linux-musl_docker
+          asset_content_type: application/octet-stream
+      - name: Upload release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./target/i686-unknown-linux-musl/release/flashpointvm-mount-daemon
+          asset_name: flashpointvm-mount-daemon_i686-unknown-linux-musl_qemu
+          asset_content_type: application/octet-stream
