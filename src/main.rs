@@ -36,6 +36,7 @@ struct LockedMountStatus<T: BuildHasher> {
 
 #[tokio::main]
 async fn main() {
+    // Create a new status variable to maintain consistency.
     let mount_status = LockedMountStatus {
         status: Mutex::new(MountStatus {
             mounted: FnvHashSet::default(),
@@ -43,25 +44,36 @@ async fn main() {
         }),
         union: tokio::sync::Mutex::new(0)
     };
-    //mount_status.mounted.insert("test".to_owned());
+
+    // Atomically reference-count the status variable, so that it can have thread-safe multiple ownership.
     let global_state = Arc::new(mount_status);
+    // Turns out we need a reference-counted "clone" of it for the second path.
     let global_state_clone = Arc::clone(&global_state);
-    //let mut already_mounted: Arc<Mutex<FnvHashSet<String>>> = Arc::new(Mutex::new(FnvHashSet::default()));
-    // Match any request and return hello world!
+
+    // Create the "/mount" route.
     let mount = warp::path("mount")
+    // It ends at /mount, no further path params.
     .and(warp::path::end())
+    // It takes a GET param.
     .and(warp::query::<FnvHashMap<String, String>>())
+    // We use and_then instead of map, because this needs async capabilities.
     .and_then(move |map: FnvHashMap<String, String>| {
         let builder = Response::builder();
+        // Increase the refcount for the global state.
         let shared_state = Arc::clone(&global_state);
         async move {
+            // Ensure that the "devname" param is set.
             if let Some(name) = map.get("devname") {
+                // If it is, mount the device.
                 let mount_result = mount_device(name, shared_state).await;
+                // Return the resulting status and body.
                 builder
                 .status(mount_result.status)
                 .body(mount_result.body)
+                // Any parsing Errors (there will be none) get turned into Rejections.
                 .map_err(|_| warp::reject())
             } else {
+                // Whoops, no "devname" param. Yell at the user.
                 builder
                 .status(400)
                 .body("Required GET param absent: 'devname'".to_owned())
@@ -69,6 +81,7 @@ async fn main() {
             }
         }
     });
+    // Pretty much the same as the previous one, not going to repeat all the comments.
     let umount = warp::path("umount")
     .and(warp::path::end())
     .and(warp::query::<FnvHashMap<String, String>>())
@@ -91,10 +104,12 @@ async fn main() {
         }
     });
 
+    // Merge the routes into a single thing.
     let routes = warp::get()
     .and(mount)
     .or(umount);
 
+    // Serve on port 3030. Let's hope this works.
     warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
 }
 
