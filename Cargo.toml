@@ -13,3 +13,10 @@ parking_lot = "0.12.1"
 
 [features]
 docker = []
+
+[profile.release]
+strip = true  # Automatically strip symbols from the binary.
+opt-level = "z"  # Optimize for size.
+lto = true # Enable link-time optimization
+codegen-units = 1 # Warning: slow! Use only one codegen unit for the most optimization.
+panic = "abort"
