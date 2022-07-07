@@ -1,7 +1,7 @@
 use std::{collections::HashSet, hash::BuildHasher, sync::Arc};
 
-use parking_lot::{Mutex};
 use fnv::{FnvHashMap, FnvHashSet};
+use parking_lot::Mutex;
 use tokio::fs::{create_dir_all, metadata, remove_dir};
 use tokio::join;
 use tokio::process::{Child, Command};
@@ -170,7 +170,6 @@ async fn mount_device<T: BuildHasher>(
         }
         // Checks passed, it's safe to proceed. Mark this device as in-progress.
         mount_status.changing.insert(content.clone());
-        
     }
 
     // Create the mountmounts in /tmp. For creating folders, we use create_dir_all.
@@ -286,7 +285,6 @@ async fn mount_device<T: BuildHasher>(
             let mut mount_status = shared_state.status.lock();
             mount_status.changing.remove(&content);
             mount_status.mounted.insert(content);
-        
         }
         // We have to use it so that it won't get dropped - the mutex unlocks on-drop.
         *count += 1;
@@ -424,7 +422,6 @@ fn remove_changing<T: BuildHasher>(
     let mut mount_status = shared_state.status.lock();
     mount_status.changing.remove(key);
     None
-        
 }
 
 /// Wait for a process to spawn and exit, and handle any errors that result.
