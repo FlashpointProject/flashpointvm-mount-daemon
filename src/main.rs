@@ -45,17 +45,55 @@ async fn main() {
     };
     //mount_status.mounted.insert("test".to_owned());
     let global_state = Arc::new(mount_status);
+    let global_state_clone = Arc::clone(&global_state);
     //let mut already_mounted: Arc<Mutex<FnvHashSet<String>>> = Arc::new(Mutex::new(FnvHashSet::default()));
     // Match any request and return hello world!
-    let routes = warp::path::end()
+    let mount = warp::path("mount")
+    .and(warp::path::end())
     .and(warp::query::<FnvHashMap<String, String>>())
-    .map(|map: FnvHashMap<String, String>| {
-        let mut response: Vec<String> = Vec::new();
-        for (key, value) in map.into_iter() {
-            response.push(format!("{}={}", key, value))
+    .and_then(move |map: FnvHashMap<String, String>| {
+        let builder = Response::builder();
+        let shared_state = Arc::clone(&global_state);
+        async move {
+            if let Some(name) = map.get("devname") {
+                let mount_result = mount_device(name, shared_state).await;
+                builder
+                .status(mount_result.status)
+                .body(mount_result.body)
+                .map_err(|_| warp::reject())
+            } else {
+                builder
+                .status(400)
+                .body("Required GET param absent: 'devname'".to_owned())
+                .map_err(|_| warp::reject())
+            }
         }
-        Response::builder().body(response.join(";"))
     });
+    let umount = warp::path("umount")
+    .and(warp::path::end())
+    .and(warp::query::<FnvHashMap<String, String>>())
+    .and_then(move |map: FnvHashMap<String, String>| {
+        let builder = Response::builder();
+        let shared_state = Arc::clone(&global_state_clone);
+        async move {
+            if let Some(name) = map.get("devname") {
+                let mount_result = umount_device(name, shared_state).await;
+                builder
+                .status(mount_result.status)
+                .body(mount_result.body)
+                .map_err(|_| warp::reject())
+            } else {
+                builder
+                .status(400)
+                .body("Required GET param absent: 'devname'".to_owned())
+                .map_err(|_| warp::reject())
+            }
+        }
+    });
+
+    let routes = warp::get()
+    .and(mount)
+    .or(umount);
 
     warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
 }
@@ -261,10 +299,9 @@ async fn mount_device<T: BuildHasher>(device_name: &str, shared_state: Arc<Locke
     }
 }
 
+/// Unmounts a device, specified by the device's filename in `DEV_LOCATION`.
 async fn umount_device<T: BuildHasher>(device_name: &str, shared_state: Arc<LockedMountStatus<T>>) -> HTTPResponse {
     // Construct some useful strings.
-    // The path to the device.
-    let devpath = DEV_LOCATION.to_owned() + device_name;
     // The fuse-archive mountpoint.
     let zip_mountpt = "/tmp/".to_owned() + device_name;
     // The fuzzyfs mountpoint.
@@ -348,7 +385,7 @@ async fn umount_device<T: BuildHasher>(device_name: &str, shared_state: Arc<Lock
     if let Some(err) = cleanup_mount(&shared_state, &zip_mountpt, &fuzzy_mountpt, &content).await {
         return err;
     }
-    
+
     // Yay, we did it!
     HTTPResponse {
         status: 200,
@@ -423,7 +460,7 @@ async fn handle_subprocess<T: BuildHasher>(spawnedproc: std::io::Result<Child>, 
                             body: "Subprocess exited with an unsuccessful status.".to_owned()
                         });
                     }
-                    return None;
+                    None
                 }, Err(_) => {
                     if let Some(err) = remove_changing(failure_key, shared_state) {
                         return Some(err);
