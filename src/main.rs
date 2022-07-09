@@ -313,7 +313,7 @@ async fn umount_device<T: BuildHasher>(
 
     // Verify that this device is indeed mounted. We wouldn't want to try unmounting a device that isn't mounted.
     {
-        let mount_status = shared_state.status.lock();
+        let mut mount_status = shared_state.status.lock();
         if mount_status.changing.contains(&content) {
             return HTTPResponse {
                 status: 409,
@@ -346,7 +346,7 @@ async fn umount_device<T: BuildHasher>(
         // Change the status from mounted to changing, and pick up a list of mounted zips at the same time.
         let mut mountlist: Vec<String> = vec![BASE_DIR.to_owned()];
         {
-            let mut mount_status = shared_state.status.lock();
+            let mount_status = shared_state.status.lock();
             for key in &mount_status.mounted {
                 mountlist.push(key.clone());
             }
