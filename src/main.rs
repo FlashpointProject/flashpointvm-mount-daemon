@@ -326,6 +326,9 @@ async fn umount_device<T: BuildHasher>(
                 body: "Device is not mounted.".to_owned(),
             };
         }
+        // Set the status to changing *before* we do anything to avoid race conditions.
+        mount_status.mounted.remove(&content);
+        mount_status.changing.insert(content.clone());
     }
 
     // Okay, it's mounted. Time to unmount it.
@@ -344,8 +347,6 @@ async fn umount_device<T: BuildHasher>(
         let mut mountlist: Vec<String> = vec![BASE_DIR.to_owned()];
         {
             let mut mount_status = shared_state.status.lock();
-            mount_status.mounted.remove(&content);
-            mount_status.changing.insert(content.clone());
             for key in &mount_status.mounted {
                 mountlist.push(key.clone());
             }
