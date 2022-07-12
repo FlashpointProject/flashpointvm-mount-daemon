@@ -15,9 +15,12 @@ const DEV_LOCATION: &str = if cfg!(feature = "docker") {
 
 const UNIONFS_MOUNTPT: &str = "/var/www/localhost/htdocs";
 const BASE_DIR: &str = "/root/base";
+
+// Binary paths, hard-coded for alpine. Modify to taste.
 const FUSE_ARCHIVE: &str = "/usr/local/bin/fuse-archive";
 const FUZZYFS: &str = "/usr/local/bin/fuzzyfs";
-const UMOUNT: &str = "/usr/bin/umount";
+const UMOUNT: &str = "/bin/umount";
+const UNIONFS: &str = "/usr/bin/unionfs";
 
 struct HTTPResponse {
     status: u16,
@@ -270,7 +273,7 @@ async fn mount_device<T: BuildHasher>(
 
         // Remount the unionfs mount.
         // (sudo) unionfs /root/base:/tmp/sdb.fuzzy/content:/tmp/sda.fuzzy/content /var/www/localhost/htdocs -o allow_other
-        let mount = Command::new("unionfs")
+        let mount = Command::new(UNIONFS)
             .arg(mountlist.join(":"))
             .arg(UNIONFS_MOUNTPT)
             .arg("-o")
@@ -354,7 +357,7 @@ async fn umount_device<T: BuildHasher>(
 
         // Remount the unionfs mount.
         // (sudo) unionfs /root/base:/tmp/sda.fuzzy/content /var/www/localhost/htdocs -o allow_other
-        let mount = Command::new("unionfs")
+        let mount = Command::new(UNIONFS)
             .arg(mountlist.join(":"))
             .arg(UNIONFS_MOUNTPT)
             .arg("-o")
