@@ -5,7 +5,10 @@ use parking_lot::Mutex;
 use tokio::fs::{create_dir_all, metadata, remove_dir};
 use tokio::join;
 use tokio::process::{Child, Command};
-use warp::{http::Response, Filter};
+use warp::Filter;
+
+mod util;
+use util::handle_devname;
 
 const DEV_LOCATION: &str = if cfg!(feature = "docker") {
     "/mnt/docker/"
@@ -22,7 +25,7 @@ const FUZZYFS: &str = "/usr/local/bin/fuzzyfs";
 const UMOUNT: &str = "/bin/umount";
 const UNIONFS: &str = "/usr/bin/unionfs";
 
-struct HTTPResponse {
+pub struct HTTPResponse {
     status: u16,
     body: String,
 }
@@ -32,7 +35,7 @@ struct MountStatus<T: BuildHasher> {
     changing: HashSet<String, T>,
 }
 
-struct LockedMountStatus<T: BuildHasher> {
+pub struct LockedMountStatus<T: BuildHasher> {
     status: Mutex<MountStatus<T>>,
     union: tokio::sync::Mutex<i32>,
 }
@@ -61,27 +64,10 @@ async fn main() {
         .and(warp::query::<FnvHashMap<String, String>>())
         // We use and_then instead of map, because this needs async capabilities.
         .and_then(move |map: FnvHashMap<String, String>| {
-            let builder = Response::builder();
             // Increase the refcount for the global state.
             let shared_state = Arc::clone(&global_state);
             async move {
-                // Ensure that the "devname" param is set.
-                if let Some(name) = map.get("devname") {
-                    // If it is, mount the device.
-                    let mount_result = mount_device(name, shared_state).await;
-                    // Return the resulting status and body.
-                    builder
-                        .status(mount_result.status)
-                        .body(mount_result.body)
-                        // Any parsing Errors (there will be none) get turned into Rejections.
-                        .map_err(|_| warp::reject())
-                } else {
-                    // Whoops, no "devname" param. Yell at the user.
-                    builder
-                        .status(400)
-                        .body("Required GET param absent: 'devname'".to_owned())
-                        .map_err(|_| warp::reject())
-                }
+                return handle_devname(shared_state, map, mount_device).await;
             }
         });
     // Pretty much the same as the previous one, not going to repeat all the comments.
@@ -89,21 +75,9 @@ async fn main() {
         .and(warp::path::end())
         .and(warp::query::<FnvHashMap<String, String>>())
         .and_then(move |map: FnvHashMap<String, String>| {
-            let builder = Response::builder();
             let shared_state = Arc::clone(&global_state_clone);
             async move {
-                if let Some(name) = map.get("devname") {
-                    let mount_result = umount_device(name, shared_state).await;
-                    builder
-                        .status(mount_result.status)
-                        .body(mount_result.body)
-                        .map_err(|_| warp::reject())
-                } else {
-                    builder
-                        .status(400)
-                        .body("Required GET param absent: 'devname'".to_owned())
-                        .map_err(|_| warp::reject())
-                }
+                return handle_devname(shared_state, map, umount_device).await;
             }
         });
 
@@ -116,14 +90,14 @@ async fn main() {
 
 /// Mounts a device, specified by the device's filename in `DEV_LOCATION`.
 async fn mount_device<T: BuildHasher>(
-    device_name: &str,
+    device_name: String,
     shared_state: Arc<LockedMountStatus<T>>,
 ) -> HTTPResponse {
     // Construct some useful strings.
     // The path to the device.
-    let devpath = DEV_LOCATION.to_owned() + device_name;
+    let devpath = DEV_LOCATION.to_owned() + &device_name;
     // The fuse-archive mountpoint.
-    let zip_mountpt = "/tmp/".to_owned() + device_name;
+    let zip_mountpt = "/tmp/".to_owned() + &device_name;
     // The fuzzyfs mountpoint.
     let fuzzy_mountpt = zip_mountpt.clone() + ".fuzzy";
     // The location of the content folder inside the fuzzyfs mount.
@@ -137,7 +111,7 @@ async fn mount_device<T: BuildHasher>(
             if meta.is_dir() {
                 return HTTPResponse {
                     status: 400,
-                    body: "Requested device is a directory : ".to_owned() + device_name,
+                    body: "Requested device is a directory : ".to_owned() + &device_name,
                 };
             }
         }
@@ -145,7 +119,7 @@ async fn mount_device<T: BuildHasher>(
         Err(_) => {
             return HTTPResponse {
                 status: 400,
-                body: "Requested device doesn't exist: ".to_owned() + device_name,
+                body: "Requested device doesn't exist: ".to_owned() + &device_name,
             };
         }
     }
@@ -302,12 +276,12 @@ async fn mount_device<T: BuildHasher>(
 
 /// Unmounts a device, specified by the device's filename in `DEV_LOCATION`.
 async fn umount_device<T: BuildHasher>(
-    device_name: &str,
+    device_name: String,
     shared_state: Arc<LockedMountStatus<T>>,
 ) -> HTTPResponse {
     // Construct some useful strings.
     // The fuse-archive mountpoint.
-    let zip_mountpt = "/tmp/".to_owned() + device_name;
+    let zip_mountpt = "/tmp/".to_owned() + &device_name;
     // The fuzzyfs mountpoint.
     let fuzzy_mountpt = zip_mountpt.clone() + ".fuzzy";
     // The location of the content folder inside the fuzzyfs mount.
