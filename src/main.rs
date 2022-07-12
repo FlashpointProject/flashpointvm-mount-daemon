@@ -160,7 +160,7 @@ async fn mount_device<T: BuildHasher>(
         // Is it already mounted?
         if mount_status.mounted.contains(&content) {
             return HTTPResponse {
-                status: 304,
+                status: 200,
                 body: "Device is already mounted.".to_owned(),
             };
         }
@@ -295,7 +295,7 @@ async fn mount_device<T: BuildHasher>(
 
     // Yay, we made it!
     HTTPResponse {
-        status: 200,
+        status: 201,
         body: "OK".to_owned(),
     }
 }
@@ -325,7 +325,7 @@ async fn umount_device<T: BuildHasher>(
         }
         if !mount_status.mounted.contains(&content) {
             return HTTPResponse {
-                status: 304,
+                status: 200,
                 body: "Device is not mounted.".to_owned(),
             };
         }
@@ -378,7 +378,7 @@ async fn umount_device<T: BuildHasher>(
 
     // Yay, we did it!
     HTTPResponse {
-        status: 200,
+        status: 201,
         body: "OK".to_owned(),
     }
 }
