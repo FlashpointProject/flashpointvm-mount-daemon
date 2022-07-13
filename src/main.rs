@@ -235,7 +235,7 @@ async fn mount_device<T: BuildHasher>(
         // any modifiers of mount_status.mounted will also be holding the union lock.
         // /root/base is always on top, and the current zip is directly after that.
         // Beyond that, we guarantee nothing about ordering. Honestly, people should be
-        // using the umount api (TODO) after a game closes anyway.
+        // using the umount api after a game closes anyway.
         let mut mountlist: Vec<String> = vec![BASE_DIR.to_owned(), content.clone()];
         {
             let mount_status = shared_state.status.lock();
