@@ -1,17 +1,15 @@
-use crate::{HTTPResponse, LockedMountStatus};
+use crate::HTTPResponse;
 use core::future::Future;
-use std::{collections::HashMap, hash::BuildHasher, sync::Arc};
+use std::{collections::HashMap, hash::BuildHasher};
 use urlencoding::decode;
 use warp::{http::Response, reject::Rejection};
 
 /// Handle a request to an endpoint that needs a devname param.
 pub async fn handle_devname<
-    T: BuildHasher,
     U: BuildHasher,
-    F: Fn(String, Arc<LockedMountStatus<T>>) -> G,
+    F: Fn(String) -> G,
     G: Future<Output = HTTPResponse>,
 >(
-    shared_state: Arc<LockedMountStatus<T>>,
     map: HashMap<String, String, U>,
     handle_param: F,
 ) -> Result<Response<String>, Rejection> {
@@ -20,7 +18,7 @@ pub async fn handle_devname<
     if let Some(name) = map.get("devname") {
         if let Ok(decoded) = decode(name) {
             // If it is, mount the device.
-            let mount_result = handle_param(decoded.into_owned(), shared_state).await;
+            let mount_result = handle_param(decoded.into_owned()).await;
             //let mount_result = mount_device(&decoded, shared_state).await;
             // Return the resulting status and body.
             builder

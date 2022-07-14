@@ -1,6 +1,7 @@
-use std::{collections::HashSet, hash::BuildHasher, sync::Arc};
+use std::{collections::HashSet, hash::BuildHasher};
 
-use fnv::{FnvHashMap, FnvHashSet};
+use fnv::{FnvBuildHasher, FnvHashMap, FnvHashSet};
+use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use tokio::fs::{create_dir_all, metadata, remove_dir};
 use tokio::join;
@@ -35,27 +36,19 @@ struct MountStatus<T: BuildHasher> {
     changing: HashSet<String, T>,
 }
 
-pub struct LockedMountStatus<T: BuildHasher> {
-    status: Mutex<MountStatus<T>>,
-    union: tokio::sync::Mutex<i32>,
+lazy_static! {
+    static ref MOUNT_STATUS: Mutex<MountStatus<FnvBuildHasher>> = Mutex::new(MountStatus {
+        mounted: FnvHashSet::default(),
+        changing: FnvHashSet::default(),
+    });
+}
+
+lazy_static! {
+    static ref UNION_MUTEX: tokio::sync::Mutex<i32> = tokio::sync::Mutex::new(0);
 }
 
 #[tokio::main]
 async fn main() {
-    // Create a new status variable to maintain consistency.
-    let mount_status = LockedMountStatus {
-        status: Mutex::new(MountStatus {
-            mounted: FnvHashSet::default(),
-            changing: FnvHashSet::default(),
-        }),
-        union: tokio::sync::Mutex::new(0),
-    };
-
-    // Atomically reference-count the status variable, so that it can have thread-safe multiple ownership.
-    let global_state = Arc::new(mount_status);
-    // Turns out we need a reference-counted "clone" of it for the second path.
-    let global_state_clone = Arc::clone(&global_state);
-
     // Create the "/mount" route.
     let mount = warp::path("mount")
         // It ends at /mount, no further path params.
@@ -65,20 +58,16 @@ async fn main() {
         // We use and_then instead of map, because this needs async capabilities.
         .and_then(move |map: FnvHashMap<String, String>| {
             // Increase the refcount for the global state.
-            let shared_state = Arc::clone(&global_state);
             async move {
-                return handle_devname(shared_state, map, mount_device).await;
+                return handle_devname(map, mount_device).await;
             }
         });
     // Pretty much the same as the previous one, not going to repeat all the comments.
     let umount = warp::path("umount")
         .and(warp::path::end())
         .and(warp::query::<FnvHashMap<String, String>>())
-        .and_then(move |map: FnvHashMap<String, String>| {
-            let shared_state = Arc::clone(&global_state_clone);
-            async move {
-                return handle_devname(shared_state, map, umount_device).await;
-            }
+        .and_then(move |map: FnvHashMap<String, String>| async move {
+            return handle_devname(map, umount_device).await;
         });
 
     // Merge the routes into a single thing.
@@ -89,10 +78,7 @@ async fn main() {
 }
 
 /// Mounts a device, specified by the device's filename in `DEV_LOCATION`.
-async fn mount_device<T: BuildHasher>(
-    device_name: String,
-    shared_state: Arc<LockedMountStatus<T>>,
-) -> HTTPResponse {
+async fn mount_device(device_name: String) -> HTTPResponse {
     // Construct some useful strings.
     // The path to the device.
     let devpath = DEV_LOCATION.to_owned() + &device_name;
@@ -130,7 +116,7 @@ async fn mount_device<T: BuildHasher>(
     //  - The device is being mounted/unmounted by another request.
     // So, we synchronize with some shared state.
     {
-        let mut mount_status = shared_state.status.lock();
+        let mut mount_status = MOUNT_STATUS.lock();
         // Is it already mounted?
         if mount_status.mounted.contains(&content) {
             return HTTPResponse {
@@ -154,9 +140,7 @@ async fn mount_device<T: BuildHasher>(
     // error if the target path already exists.
     let dirs = join!(create_dir_all(&zip_mountpt), create_dir_all(&fuzzy_mountpt));
     if dirs.0.is_err() || dirs.1.is_err() {
-        if let Some(err) = remove_changing(&content, &shared_state) {
-            return err;
-        }
+        remove_changing(&content);
         return HTTPResponse {
             status: 500,
             body: "Could not create mountpoints.".to_owned(),
@@ -171,7 +155,7 @@ async fn mount_device<T: BuildHasher>(
         .arg("-o")
         .arg("allow_other")
         .spawn();
-    if let Some(err) = handle_subprocess(zipmount, &content, &shared_state).await {
+    if let Some(err) = handle_subprocess(zipmount, &content).await {
         return err;
     }
 
@@ -183,7 +167,7 @@ async fn mount_device<T: BuildHasher>(
         .arg("-o")
         .arg("allow_other")
         .spawn();
-    if let Some(err) = handle_subprocess(fuzzymount, &content, &shared_state).await {
+    if let Some(err) = handle_subprocess(fuzzymount, &content).await {
         // If we can't reliably spawn subprocesses, no point in trying to unmount the zip mount.
         // This will be a code 500 anyway, that should be enough for people to get the idea that
         // something went wrong.
@@ -207,9 +191,7 @@ async fn mount_device<T: BuildHasher>(
     }
     // It doesn't exist. As part of clean-up, we unmount the things we mounted a moment ago.
     if !content_exists {
-        if let Some(err) =
-            cleanup_mount(&shared_state, &zip_mountpt, &fuzzy_mountpt, &content).await
-        {
+        if let Some(err) = cleanup_mount(&zip_mountpt, &fuzzy_mountpt, &content).await {
             return err;
         }
         return HTTPResponse {
@@ -219,15 +201,15 @@ async fn mount_device<T: BuildHasher>(
     }
 
     // The content folder exists! Now we mount it to the unionfs mount.
-    // shared_state.union is a mutex for controlling access to the unionfs mountpoint: /var/www/localhost/htdocs.
+    // UNION_MUTEX is a mutex for controlling access to the unionfs mountpoint: /var/www/localhost/htdocs.
     // We wouldn't want multiple things to be mounting/unmounting unionfs at the same time - that could cause race conditions.
     // The lock also protects a number, because I couldn't figure out how to lock without data.
     {
-        let mut count = shared_state.union.lock().await;
+        let mut count = UNION_MUTEX.lock().await;
         // Unmount the current unionfs.
         // (sudo) umount -l /var/www/localhost/htdocs
         let umount = Command::new(UMOUNT).arg("-l").arg(UNIONFS_MOUNTPT).spawn();
-        if let Some(err) = handle_subprocess(umount, &content, &shared_state).await {
+        if let Some(err) = handle_subprocess(umount, &content).await {
             return err;
         }
 
@@ -238,7 +220,7 @@ async fn mount_device<T: BuildHasher>(
         // using the umount api after a game closes anyway.
         let mut mountlist: Vec<String> = vec![BASE_DIR.to_owned(), content.clone()];
         {
-            let mount_status = shared_state.status.lock();
+            let mount_status = MOUNT_STATUS.lock();
             for key in &mount_status.mounted {
                 // PERF: zero-copy?
                 mountlist.push(key.clone());
@@ -253,13 +235,13 @@ async fn mount_device<T: BuildHasher>(
             .arg("-o")
             .arg("allow_other")
             .spawn();
-        if let Some(err) = handle_subprocess(mount, &content, &shared_state).await {
+        if let Some(err) = handle_subprocess(mount, &content).await {
             return err;
         }
 
         // The zip is mounted! Move this device's status from changing (inflight) to mounted.
         {
-            let mut mount_status = shared_state.status.lock();
+            let mut mount_status = MOUNT_STATUS.lock();
             mount_status.changing.remove(&content);
             mount_status.mounted.insert(content);
         }
@@ -275,10 +257,7 @@ async fn mount_device<T: BuildHasher>(
 }
 
 /// Unmounts a device, specified by the device's filename in `DEV_LOCATION`.
-async fn umount_device<T: BuildHasher>(
-    device_name: String,
-    shared_state: Arc<LockedMountStatus<T>>,
-) -> HTTPResponse {
+async fn umount_device(device_name: String) -> HTTPResponse {
     // Construct some useful strings.
     // The fuse-archive mountpoint.
     let zip_mountpt = "/tmp/".to_owned() + &device_name;
@@ -290,7 +269,7 @@ async fn umount_device<T: BuildHasher>(
 
     // Verify that this device is indeed mounted. We wouldn't want to try unmounting a device that isn't mounted.
     {
-        let mut mount_status = shared_state.status.lock();
+        let mut mount_status = MOUNT_STATUS.lock();
         if mount_status.changing.contains(&content) {
             return HTTPResponse {
                 status: 409,
@@ -311,19 +290,19 @@ async fn umount_device<T: BuildHasher>(
     // Okay, it's mounted. Time to unmount it.
     {
         // Acquire the async union lock.
-        let mut count = shared_state.union.lock().await;
+        let mut count = UNION_MUTEX.lock().await;
 
         // Unmount the current unionfs.
         // (sudo) umount -l /var/www/localhost/htdocs
         let umount = Command::new(UMOUNT).arg("-l").arg(UNIONFS_MOUNTPT).spawn();
-        if let Some(err) = handle_subprocess(umount, &content, &shared_state).await {
+        if let Some(err) = handle_subprocess(umount, &content).await {
             return err;
         }
 
         // Change the status from mounted to changing, and pick up a list of mounted zips at the same time.
         let mut mountlist: Vec<String> = vec![BASE_DIR.to_owned()];
         {
-            let mount_status = shared_state.status.lock();
+            let mount_status = MOUNT_STATUS.lock();
             for key in &mount_status.mounted {
                 mountlist.push(key.clone());
             }
@@ -337,7 +316,7 @@ async fn umount_device<T: BuildHasher>(
             .arg("-o")
             .arg("allow_other")
             .spawn();
-        if let Some(err) = handle_subprocess(mount, &content, &shared_state).await {
+        if let Some(err) = handle_subprocess(mount, &content).await {
             return err;
         }
 
@@ -346,7 +325,7 @@ async fn umount_device<T: BuildHasher>(
     }
     // We've successfully removed it from the union mount, continue to the other
     // unmounting steps.
-    if let Some(err) = cleanup_mount(&shared_state, &zip_mountpt, &fuzzy_mountpt, &content).await {
+    if let Some(err) = cleanup_mount(&zip_mountpt, &fuzzy_mountpt, &content).await {
         return err;
     }
 
@@ -357,9 +336,8 @@ async fn umount_device<T: BuildHasher>(
     }
 }
 
-/// Cleans up a non-unioned device mount. Except for synchronization errors, always removes the `union_mountpt` from `shared_state`.
-async fn cleanup_mount<T: BuildHasher>(
-    shared_state: &Arc<LockedMountStatus<T>>,
+/// Cleans up a non-unioned device mount. Always removes the `union_mountpt` from `MOUNT_STATUS`.
+async fn cleanup_mount(
     zip_mountpt: &str,
     fuzzy_mountpt: &str,
     union_mountpt: &str,
@@ -367,46 +345,40 @@ async fn cleanup_mount<T: BuildHasher>(
     // Unmount the fuzzyfs mount.
     // (sudo) umount /tmp/sdb.fuzzy
     let fuzzy_unmount = Command::new(UMOUNT).arg(fuzzy_mountpt).spawn();
-    if let Some(err) = handle_subprocess(fuzzy_unmount, union_mountpt, shared_state).await {
+    if let Some(err) = handle_subprocess(fuzzy_unmount, union_mountpt).await {
         return Some(err);
     }
 
     // Unmount the fuse-archive mount.
     let zip_unmount = Command::new(UMOUNT).arg(zip_mountpt).spawn();
-    if let Some(err) = handle_subprocess(zip_unmount, union_mountpt, shared_state).await {
+    if let Some(err) = handle_subprocess(zip_unmount, union_mountpt).await {
         return Some(err);
     }
 
     // Delete the mount points.
     let dirs = join!(remove_dir(fuzzy_mountpt), remove_dir(zip_mountpt));
     if dirs.0.is_err() || dirs.1.is_err() {
-        if let Some(err) = remove_changing(union_mountpt, shared_state) {
-            return Some(err);
-        }
+        remove_changing(union_mountpt);
         return Some(HTTPResponse {
             status: 500,
             body: "Could not remove mountpoints.".to_owned(),
         });
     }
     // Remove the inflight marker for this device.
-    remove_changing(union_mountpt, shared_state)
-}
-
-/// Removes a key from the shared state's `changing` hashset. Returns an error, or `None`.
-fn remove_changing<T: BuildHasher>(
-    key: &str,
-    shared_state: &Arc<LockedMountStatus<T>>,
-) -> Option<HTTPResponse> {
-    let mut mount_status = shared_state.status.lock();
-    mount_status.changing.remove(key);
+    remove_changing(union_mountpt);
     None
 }
 
+/// Removes a key from the shared state's `changing` hashset.
+fn remove_changing(key: &str) {
+    let mut mount_status = MOUNT_STATUS.lock();
+    mount_status.changing.remove(key);
+}
+
 /// Wait for a process to spawn and exit, and handle any errors that result.
-async fn handle_subprocess<T: BuildHasher>(
+async fn handle_subprocess(
     spawnedproc: std::io::Result<Child>,
     failure_key: &str,
-    shared_state: &Arc<LockedMountStatus<T>>,
 ) -> Option<HTTPResponse> {
     match spawnedproc {
         // Did it spawn successfully?
@@ -416,9 +388,7 @@ async fn handle_subprocess<T: BuildHasher>(
                 Ok(status_code) => {
                     // Check that it was successful.
                     if !status_code.success() {
-                        if let Some(err) = remove_changing(failure_key, shared_state) {
-                            return Some(err);
-                        }
+                        remove_changing(failure_key);
                         return Some(HTTPResponse {
                             status: 500,
                             body: "Subprocess exited with an unsuccessful status.".to_owned(),
@@ -427,9 +397,7 @@ async fn handle_subprocess<T: BuildHasher>(
                     None
                 }
                 Err(_) => {
-                    if let Some(err) = remove_changing(failure_key, shared_state) {
-                        return Some(err);
-                    }
+                    remove_changing(failure_key);
                     Some(HTTPResponse {
                         status: 500,
                         body: "Could not read subprocess status.".to_owned(),
@@ -438,9 +406,7 @@ async fn handle_subprocess<T: BuildHasher>(
             }
         }
         Err(_) => {
-            if let Some(err) = remove_changing(failure_key, shared_state) {
-                return Some(err);
-            }
+            remove_changing(failure_key);
             Some(HTTPResponse {
                 status: 500,
                 body: "Could not spawn subprocess.".to_owned(),
