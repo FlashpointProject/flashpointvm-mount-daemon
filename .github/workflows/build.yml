@@ -1,6 +1,4 @@
-on:
-  push:
-    branches: [ "master" ]
+on: push
 
 name: build
 
@@ -8,16 +6,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: FlashpointVM Mount Daemon
+  lint:
+    name: Lint syntax and formatting.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout the repo.
         uses: actions/checkout@v3
-      - name: Grab commit SHA.
-        id: prepare
-        run: echo "::set-output name=sha_short::$(git rev-parse --short HEAD)"
-      - name: Install latest stable
+      - name: Install latest stable Rust toolchain
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
@@ -34,6 +29,24 @@ jobs:
         with:
           command: clippy
           args: -- -D warnings
+  release:
+    name: Build and release
+    if: github.ref == 'refs/heads/master'
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the repo.
+        uses: actions/checkout@v3
+      - name: Install latest stable Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          target: i686-unknown-linux-musl
+          default: true
+      - name: Grab commit SHA.
+        id: prepare
+        run: echo "::set-output name=sha_short::$(git rev-parse --short HEAD)"
       - name: Build for docker
         uses: actions-rs/cargo@v1
         with:
